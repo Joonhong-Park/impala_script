@@ -7,27 +7,16 @@
 
 ALL_CLUSTERS=("cluster1" "cluster2" "cluster3" "cluster4" "cluster5")
 
-declare -A CLUSTER_HOST CLUSTER_USER CLUSTER_PASS
+IMPALA_USER="impala"
+IMPALA_PASS="passwd"
+
+declare -A CLUSTER_HOST
 
 CLUSTER_HOST["cluster1"]="host1.example.com"
-CLUSTER_USER["cluster1"]="impala"
-CLUSTER_PASS["cluster1"]="passwd1"
-
 CLUSTER_HOST["cluster2"]="host2.example.com"
-CLUSTER_USER["cluster2"]="impala"
-CLUSTER_PASS["cluster2"]="passwd2"
-
 CLUSTER_HOST["cluster3"]="host3.example.com"
-CLUSTER_USER["cluster3"]="impala"
-CLUSTER_PASS["cluster3"]="passwd3"
-
 CLUSTER_HOST["cluster4"]="host4.example.com"
-CLUSTER_USER["cluster4"]="impala"
-CLUSTER_PASS["cluster4"]="passwd4"
-
 CLUSTER_HOST["cluster5"]="host5.example.com"
-CLUSTER_USER["cluster5"]="impala"
-CLUSTER_PASS["cluster5"]="passwd5"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT_NAME="$(basename "$0")"
@@ -48,7 +37,7 @@ Options:
   -h            도움말
 
 Clusters:
-$(for i in "${!ALL_CLUSTERS[@]}"; do printf "  %d) %s (%s)\n" $((i+1)) "${ALL_CLUSTERS[$i]}" "${CLUSTER_HOST[${ALL_CLUSTERS[$i]}]}"; done)
+$(for i in "${!ALL_CLUSTERS[@]}"; do printf "  %d) %s\n" $((i+1)) "${CLUSTER_HOST[${ALL_CLUSTERS[$i]}]}"; done)
 
 Examples:
   $SCRIPT_NAME -q "SELECT count(*) FROM db.table_name"
@@ -131,22 +120,20 @@ run_on_cluster() {
     local log_file="$2"
 
     local host="${CLUSTER_HOST[$cluster]}"
-    local user="${CLUSTER_USER[$cluster]}"
-    local pass="${CLUSTER_PASS[$cluster]}"
 
     {
         echo "===== [$cluster] 시작: $(date '+%Y-%m-%d %H:%M:%S') ====="
         echo "  Host : $host"
-        echo "  User : $user"
+        echo "  User : $IMPALA_USER"
         echo "  $INPUT_LABEL"
         echo "------------------------------------------------------------"
 
         impala-shell \
             -i "$host" \
-            -u "$user" \
+            -u "$IMPALA_USER" \
             --ssl \
             -l \
-            --ldap_password_cmd="echo -n $pass" \
+            --ldap_password_cmd="echo -n $IMPALA_PASS" \
             --auth_creds_ok_in_clear \
             "${INPUT_OPT[@]}"
         local rc=$?
