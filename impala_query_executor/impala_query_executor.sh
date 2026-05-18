@@ -124,6 +124,7 @@ run_on_cluster() {
 
 # --------------------------------------------------------------
 TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
+LOG_FILE="${LOG_DIR}/run_${TIMESTAMP}.log"
 
 echo ""
 echo "============================================================"
@@ -131,38 +132,41 @@ echo " Impala 멀티 클러스터 쿼리 실행기"
 echo " 시작  : $(date '+%Y-%m-%d %H:%M:%S')"
 printf " 대상  :"; for num in "${TARGET_NUMS[@]}"; do printf "  %d) %s" "$num" "${CLUSTER_HOSTS[$((num-1))]}"; done; echo ""
 echo " $INPUT_LABEL"
-echo " 로그  : $LOG_DIR (실패 클러스터만 보관)"
+echo " 로그  : $LOG_FILE"
 echo "============================================================"
 echo ""
 
-declare -a PIDS LOG_FILES
+declare -a PIDS TMP_FILES
 
 for num in "${TARGET_NUMS[@]}"; do
-    log_file="${LOG_DIR}/cluster${num}_${TIMESTAMP}.log"
-    echo "[START] [${num}] ${CLUSTER_HOSTS[$((num-1))]} → $(basename "$log_file")"
-    run_on_cluster "$num" "$log_file" &
+    tmp_file="${LOG_DIR}/.tmp_cluster${num}_${TIMESTAMP}"
+    echo "[START] [${num}] ${CLUSTER_HOSTS[$((num-1))]} 실행 시작"
+    run_on_cluster "$num" "$tmp_file" &
     PIDS+=($!)
-    LOG_FILES+=("$log_file")
+    TMP_FILES+=("$tmp_file")
 done
 
 echo ""
 echo "[INFO] 전체 클러스터 실행 중... 완료 대기"
 echo ""
 
-declare -a SUCCESS FAILED FAILED_LOGS
+declare -a SUCCESS FAILED
 
 for i in "${!PIDS[@]}"; do
     wait "${PIDS[$i]}"; rc=$?
     num="${TARGET_NUMS[$i]}"
-    log="${LOG_FILES[$i]}"
 
     if [[ $rc -eq 0 ]]; then
-        SUCCESS+=("$num"); rm -f "$log"
+        SUCCESS+=("$num")
         echo "[  OK  ] [${num}] 성공"
     else
-        FAILED+=("$num"); FAILED_LOGS+=("$log")
-        echo "[ FAIL ] [${num}] 실패 → $(basename "$log")"
+        FAILED+=("$num")
+        echo "[ FAIL ] [${num}] 실패"
     fi
+
+    # 클러스터 순서대로 단일 로그에 합치기
+    cat "${TMP_FILES[$i]}" >> "$LOG_FILE"
+    rm -f "${TMP_FILES[$i]}"
 done
 
 echo ""
@@ -171,6 +175,7 @@ echo " 실행 결과 요약 | 완료: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "============================================================"
 printf " %-6s : %d개  [%s]\n" "성공" "${#SUCCESS[@]}" "${SUCCESS[*]:-없음}"
 printf " %-6s : %d개  [%s]\n" "실패" "${#FAILED[@]}" "${FAILED[*]:-없음}"
+echo " 로그  : $LOG_FILE"
 
 if [[ ${#FAILED[@]} -gt 0 ]]; then
     echo ""
@@ -178,11 +183,9 @@ if [[ ${#FAILED[@]} -gt 0 ]]; then
     echo " [안내] 아래 클러스터에서 오류가 발생했습니다."
     echo "        로그를 확인 후 해당 클러스터만 재시도하세요."
     echo "------------------------------------------------------------"
-    for i in "${!FAILED[@]}"; do
-        num="${FAILED[$i]}"
+    for num in "${FAILED[@]}"; do
         echo ""
         echo "  클러스터 : ${num}) ${CLUSTER_HOSTS[$((num-1))]}"
-        echo "  로그파일 : ${FAILED_LOGS[$i]}"
         echo "  재시도   : $SCRIPT_NAME $INPUT_RETRY -c $num"
     done
     echo ""
