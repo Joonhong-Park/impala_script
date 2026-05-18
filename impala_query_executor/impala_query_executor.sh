@@ -5,53 +5,49 @@
 # 사용법: ./impala_query_executor.sh -q "쿼리문" | -f sql파일 [-c 번호(쉼표구분)]
 # ==============================================================
 
-ALL_CLUSTERS=("cluster1" "cluster2" "cluster3" "cluster4" "cluster5")
-
+# 클러스터 호스트 (순서 = 번호)
+CLUSTER_HOSTS=(
+    "host1.example.com"
+    "host2.example.com"
+    "host3.example.com"
+    "host4.example.com"
+    "host5.example.com"
+)
 IMPALA_USER="impala"
 IMPALA_PASS="passwd"
 
-declare -A CLUSTER_HOST
-
-CLUSTER_HOST["cluster1"]="host1.example.com"
-CLUSTER_HOST["cluster2"]="host2.example.com"
-CLUSTER_HOST["cluster3"]="host3.example.com"
-CLUSTER_HOST["cluster4"]="host4.example.com"
-CLUSTER_HOST["cluster5"]="host5.example.com"
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT_NAME="$(basename "$0")"
-LOG_DIR="${SCRIPT_DIR}/logs"
+LOG_DIR="$(cd "$(dirname "$0")" && pwd)/logs"
 mkdir -p "$LOG_DIR"
 
-MAX_NUM=${#ALL_CLUSTERS[@]}
+MAX_NUM=${#CLUSTER_HOSTS[@]}
 
+# --------------------------------------------------------------
 usage() {
     cat <<EOF
 
 Usage: $SCRIPT_NAME [OPTIONS]
 
 Options:
-  -q <query>    실행할 쿼리문 (직접 입력)
-  -f <file>     실행할 SQL 파일 경로
-  -c <numbers>  대상 클러스터 번호 - 쉼표 구분, 1~${MAX_NUM} (기본값: 전체)
+  -q <query>    실행할 쿼리문
+  -f <file>     실행할 SQL 파일
+  -c <numbers>  클러스터 번호 - 쉼표 구분, 1~${MAX_NUM} (기본값: 전체)
   -h            도움말
 
 Clusters:
-$(for i in "${!ALL_CLUSTERS[@]}"; do printf "  %d) %s\n" $((i+1)) "${CLUSTER_HOST[${ALL_CLUSTERS[$i]}]}"; done)
+$(for i in "${!CLUSTER_HOSTS[@]}"; do printf "  %d) %s\n" $((i+1)) "${CLUSTER_HOSTS[$i]}"; done)
 
 Examples:
-  $SCRIPT_NAME -q "SELECT count(*) FROM db.table_name"
-  $SCRIPT_NAME -f ./sql/add_partition.sql
-  $SCRIPT_NAME -q "REFRESH db.table_name" -c 1,3
-  $SCRIPT_NAME -f ./sql/create_table.sql -c 2,4,5
+  $SCRIPT_NAME -q "SELECT count(*) FROM db.table"
+  $SCRIPT_NAME -f ./add_partition.sql
+  $SCRIPT_NAME -q "REFRESH db.table" -c 1,3
 
 EOF
     exit 1
 }
 
-QUERY=""
-SQL_FILE=""
-TARGET_INPUT=""
+# --------------------------------------------------------------
+QUERY="" SQL_FILE="" TARGET_INPUT=""
 
 while getopts ":q:f:c:h" opt; do
     case $opt in
@@ -64,40 +60,25 @@ while getopts ":q:f:c:h" opt; do
     esac
 done
 
-if [[ -z "$QUERY" && -z "$SQL_FILE" ]]; then
-    echo "[ERROR] -q 또는 -f 옵션 중 하나는 필수입니다."
-    usage
-fi
-
-if [[ -n "$QUERY" && -n "$SQL_FILE" ]]; then
-    echo "[ERROR] -q 와 -f 는 동시에 사용할 수 없습니다."
-    usage
-fi
+[[ -z "$QUERY" && -z "$SQL_FILE" ]] && { echo "[ERROR] -q 또는 -f 중 하나는 필수입니다."; usage; }
+[[ -n "$QUERY" && -n "$SQL_FILE" ]] && { echo "[ERROR] -q 와 -f 는 동시에 사용할 수 없습니다."; usage; }
 
 if [[ -n "$SQL_FILE" ]]; then
     SQL_FILE="$(realpath "$SQL_FILE" 2>/dev/null || echo "$SQL_FILE")"
-    if [[ ! -f "$SQL_FILE" ]]; then
-        echo "[ERROR] SQL 파일을 찾을 수 없습니다: $SQL_FILE"
-        exit 1
-    fi
+    [[ ! -f "$SQL_FILE" ]] && { echo "[ERROR] SQL 파일을 찾을 수 없습니다: $SQL_FILE"; exit 1; }
 fi
 
 if [[ -n "$QUERY" ]]; then
-    INPUT_OPT=(-q "$QUERY")
-    INPUT_LABEL="쿼리  : $QUERY"
-    INPUT_RETRY="-q \"$QUERY\""
+    INPUT_OPT=(-q "$QUERY"); INPUT_LABEL="쿼리  : $QUERY"; INPUT_RETRY="-q \"$QUERY\""
 else
-    INPUT_OPT=(-f "$SQL_FILE")
-    INPUT_LABEL="파일  : $SQL_FILE"
-    INPUT_RETRY="-f $SQL_FILE"
+    INPUT_OPT=(-f "$SQL_FILE"); INPUT_LABEL="파일  : $SQL_FILE"; INPUT_RETRY="-f $SQL_FILE"
 fi
 
-TARGET_LIST=()
+# --------------------------------------------------------------
 TARGET_NUMS=()
 
 if [[ -z "$TARGET_INPUT" ]]; then
-    TARGET_LIST=("${ALL_CLUSTERS[@]}")
-    for i in "${!ALL_CLUSTERS[@]}"; do TARGET_NUMS+=($((i+1))); done
+    for i in "${!CLUSTER_HOSTS[@]}"; do TARGET_NUMS+=($((i+1))); done
 else
     IFS=',' read -ra selected <<< "$TARGET_INPUT"
     for num in "${selected[@]}"; do
@@ -105,24 +86,20 @@ else
             echo "[WARN] 유효하지 않은 번호: '$num' (건너뜀, 1~${MAX_NUM} 사이)"
             continue
         fi
-        TARGET_LIST+=("${ALL_CLUSTERS[$((num-1))]}")
         TARGET_NUMS+=("$num")
     done
 fi
 
-if [[ ${#TARGET_LIST[@]} -eq 0 ]]; then
-    echo "[ERROR] 실행 대상 클러스터가 없습니다."
-    exit 1
-fi
+[[ ${#TARGET_NUMS[@]} -eq 0 ]] && { echo "[ERROR] 실행 대상 클러스터가 없습니다."; exit 1; }
 
+# --------------------------------------------------------------
 run_on_cluster() {
-    local cluster="$1"
+    local num="$1"
     local log_file="$2"
-
-    local host="${CLUSTER_HOST[$cluster]}"
+    local host="${CLUSTER_HOSTS[$((num-1))]}"
 
     {
-        echo "===== [$cluster] 시작: $(date '+%Y-%m-%d %H:%M:%S') ====="
+        echo "===== [클러스터 ${num}] 시작: $(date '+%Y-%m-%d %H:%M:%S') ====="
         echo "  Host : $host"
         echo "  User : $IMPALA_USER"
         echo "  $INPUT_LABEL"
@@ -131,32 +108,28 @@ run_on_cluster() {
         impala-shell \
             -i "$host" \
             -u "$IMPALA_USER" \
-            --ssl \
-            -l \
+            --ssl -l \
             --ldap_password_cmd="echo -n $IMPALA_PASS" \
             --auth_creds_ok_in_clear \
             "${INPUT_OPT[@]}"
         local rc=$?
 
         echo "------------------------------------------------------------"
-        if [[ $rc -eq 0 ]]; then
-            echo "===== [$cluster] 완료: $(date '+%Y-%m-%d %H:%M:%S') | 결과: 성공 ====="
-        else
-            echo "===== [$cluster] 완료: $(date '+%Y-%m-%d %H:%M:%S') | 결과: 실패 (exit: $rc) ====="
-        fi
-
+        [[ $rc -eq 0 ]] \
+            && echo "===== [클러스터 ${num}] 완료: $(date '+%Y-%m-%d %H:%M:%S') | 결과: 성공 =====" \
+            || echo "===== [클러스터 ${num}] 완료: $(date '+%Y-%m-%d %H:%M:%S') | 결과: 실패 (exit: $rc) ====="
         return $rc
     } > "$log_file" 2>&1
 }
 
+# --------------------------------------------------------------
 TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
-START_TIME=$(date '+%Y-%m-%d %H:%M:%S')
 
 echo ""
 echo "============================================================"
 echo " Impala 멀티 클러스터 쿼리 실행기"
-echo " 시작  : $START_TIME"
-printf " 대상  :"; for i in "${!TARGET_LIST[@]}"; do printf "  %s) %s" "${TARGET_NUMS[$i]}" "${TARGET_LIST[$i]}"; done; echo ""
+echo " 시작  : $(date '+%Y-%m-%d %H:%M:%S')"
+printf " 대상  :"; for num in "${TARGET_NUMS[@]}"; do printf "  %d) %s" "$num" "${CLUSTER_HOSTS[$((num-1))]}"; done; echo ""
 echo " $INPUT_LABEL"
 echo " 로그  : $LOG_DIR (실패 클러스터만 보관)"
 echo "============================================================"
@@ -164,12 +137,10 @@ echo ""
 
 declare -a PIDS LOG_FILES
 
-for i in "${!TARGET_LIST[@]}"; do
-    cluster="${TARGET_LIST[$i]}"
-    num="${TARGET_NUMS[$i]}"
-    log_file="${LOG_DIR}/${cluster}_${TIMESTAMP}.log"
-    echo "[START] [${num}] $cluster 실행 시작 → $(basename "$log_file")"
-    run_on_cluster "$cluster" "$log_file" &
+for num in "${TARGET_NUMS[@]}"; do
+    log_file="${LOG_DIR}/cluster${num}_${TIMESTAMP}.log"
+    echo "[START] [${num}] ${CLUSTER_HOSTS[$((num-1))]} → $(basename "$log_file")"
+    run_on_cluster "$num" "$log_file" &
     PIDS+=($!)
     LOG_FILES+=("$log_file")
 done
@@ -178,24 +149,19 @@ echo ""
 echo "[INFO] 전체 클러스터 실행 중... 완료 대기"
 echo ""
 
-declare -a SUCCESS FAILED FAILED_LOGS FAILED_NUMS
+declare -a SUCCESS FAILED FAILED_LOGS
 
 for i in "${!PIDS[@]}"; do
-    wait "${PIDS[$i]}"
-    rc=$?
-    cluster="${TARGET_LIST[$i]}"
+    wait "${PIDS[$i]}"; rc=$?
     num="${TARGET_NUMS[$i]}"
     log="${LOG_FILES[$i]}"
 
     if [[ $rc -eq 0 ]]; then
-        SUCCESS+=("${num}) ${cluster}")
-        rm -f "$log"
-        echo "[  OK  ] [${num}] $cluster 성공"
+        SUCCESS+=("$num"); rm -f "$log"
+        echo "[  OK  ] [${num}] 성공"
     else
-        FAILED+=("${num}) ${cluster}")
-        FAILED_LOGS+=("$log")
-        FAILED_NUMS+=("$num")
-        echo "[ FAIL ] [${num}] $cluster 실패 → $(basename "$log")"
+        FAILED+=("$num"); FAILED_LOGS+=("$log")
+        echo "[ FAIL ] [${num}] 실패 → $(basename "$log")"
     fi
 done
 
@@ -212,12 +178,12 @@ if [[ ${#FAILED[@]} -gt 0 ]]; then
     echo " [안내] 아래 클러스터에서 오류가 발생했습니다."
     echo "        로그를 확인 후 해당 클러스터만 재시도하세요."
     echo "------------------------------------------------------------"
-
     for i in "${!FAILED[@]}"; do
+        num="${FAILED[$i]}"
         echo ""
-        echo "  클러스터 : ${FAILED[$i]}"
+        echo "  클러스터 : ${num}) ${CLUSTER_HOSTS[$((num-1))]}"
         echo "  로그파일 : ${FAILED_LOGS[$i]}"
-        echo "  재시도   : $SCRIPT_NAME $INPUT_RETRY -c ${FAILED_NUMS[$i]}"
+        echo "  재시도   : $SCRIPT_NAME $INPUT_RETRY -c $num"
     done
     echo ""
 fi
