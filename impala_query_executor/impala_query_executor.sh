@@ -5,14 +5,13 @@
 # 사용법: ./impala_query_executor.sh -q "쿼리문" | -f sql파일 [-c 번호(쉼표구분)]
 # ==============================================================
 
-# 클러스터 호스트 (순서 = 번호)
-CLUSTER_HOSTS=(
-    "host1.example.com"
-    "host2.example.com"
-    "host3.example.com"
-    "host4.example.com"
-    "host5.example.com"
-)
+# 클러스터 호스트 (번호가 키 — 항목 주석 처리해도 나머지 번호 유지)
+declare -A CLUSTER_HOSTS
+CLUSTER_HOSTS[1]="host1.example.com"
+CLUSTER_HOSTS[2]="host2.example.com"
+CLUSTER_HOSTS[3]="host3.example.com"
+CLUSTER_HOSTS[4]="host4.example.com"
+CLUSTER_HOSTS[5]="host5.example.com"
 IMPALA_USER="impala"
 IMPALA_PASS="passwd"
 
@@ -20,7 +19,7 @@ SCRIPT_NAME="$(basename "$0")"
 LOG_DIR="$(cd "$(dirname "$0")" && pwd)/logs"
 mkdir -p "$LOG_DIR"
 
-MAX_NUM=${#CLUSTER_HOSTS[@]}
+# [변경] MAX_NUM 제거 — 연관 배열은 크기로 범위 검사 불가, 키 존재 여부로 대체
 
 # --------------------------------------------------------------
 usage() {
@@ -31,11 +30,11 @@ Usage: $SCRIPT_NAME [OPTIONS]
 Options:
   -q <query>    실행할 쿼리문
   -f <file>     실행할 SQL 파일
-  -c <numbers>  클러스터 번호 - 쉼표 구분, 1~${MAX_NUM} (기본값: 전체)
+  -c <numbers>  클러스터 번호 - 쉼표 구분 (기본값: 전체)
   -h            도움말
 
 Clusters:
-$(for i in "${!CLUSTER_HOSTS[@]}"; do printf "  %d) %s\n" $((i+1)) "${CLUSTER_HOSTS[$i]}"; done)
+$(for i in $(echo "${!CLUSTER_HOSTS[@]}" | tr ' ' '\n' | sort -n); do printf "  %d) %s\n" "$i" "${CLUSTER_HOSTS[$i]}"; done) # [변경] 키를 번호로 직접 사용, sort -n 으로 순서 보장
 
 Examples:
   $SCRIPT_NAME -q "SELECT count(*) FROM db.table"
@@ -78,12 +77,12 @@ fi
 TARGET_NUMS=()
 
 if [[ -z "$TARGET_INPUT" ]]; then
-    for i in "${!CLUSTER_HOSTS[@]}"; do TARGET_NUMS+=($((i+1))); done
+    for i in $(echo "${!CLUSTER_HOSTS[@]}" | tr ' ' '\n' | sort -n); do TARGET_NUMS+=("$i"); done # [변경] 키를 번호로 직접 사용
 else
     IFS=',' read -ra selected <<< "$TARGET_INPUT"
     for num in "${selected[@]}"; do
-        if ! [[ "$num" =~ ^[0-9]+$ ]] || [[ $num -lt 1 ]] || [[ $num -gt $MAX_NUM ]]; then
-            echo "[WARN] 유효하지 않은 번호: '$num' (건너뜀, 1~${MAX_NUM} 사이)"
+        if ! [[ "$num" =~ ^[0-9]+$ ]] || [[ -z "${CLUSTER_HOSTS[$num]+x}" ]]; then # [변경] 범위 비교 → 키 존재 여부 확인
+            echo "[WARN] 유효하지 않은 번호: '$num' (건너뜀, 정의된 클러스터 번호가 아님)"
             continue
         fi
         TARGET_NUMS+=("$num")
@@ -96,7 +95,7 @@ fi
 run_on_cluster() {
     local num="$1"
     local log_file="$2"
-    local host="${CLUSTER_HOSTS[$((num-1))]}"
+    local host="${CLUSTER_HOSTS[$num]}" # [변경] $((num-1)) → $num (연관 배열 키 직접 사용)
 
     {
         echo "===== [클러스터 ${num}] 시작: $(date '+%Y-%m-%d %H:%M:%S') ====="
@@ -130,7 +129,7 @@ echo ""
 echo "============================================================"
 echo " Impala 멀티 클러스터 쿼리 실행기"
 echo " 시작  : $(date '+%Y-%m-%d %H:%M:%S')"
-printf " 대상  :"; for num in "${TARGET_NUMS[@]}"; do printf "  %d) %s" "$num" "${CLUSTER_HOSTS[$((num-1))]}"; done; echo ""
+printf " 대상  :"; for num in "${TARGET_NUMS[@]}"; do printf "  %d) %s" "$num" "${CLUSTER_HOSTS[$num]}"; done; echo "" # [변경] $((num-1)) → $num
 echo " $INPUT_LABEL"
 echo " 로그  : $LOG_FILE"
 echo "============================================================"
@@ -140,7 +139,7 @@ declare -a PIDS TMP_FILES
 
 for num in "${TARGET_NUMS[@]}"; do
     tmp_file="${LOG_DIR}/.tmp_cluster${num}_${TIMESTAMP}"
-    echo "[START] [${num}] ${CLUSTER_HOSTS[$((num-1))]} 실행 시작"
+    echo "[START] [${num}] ${CLUSTER_HOSTS[$num]} 실행 시작" # [변경] $((num-1)) → $num
     run_on_cluster "$num" "$tmp_file" &
     PIDS+=($!)
     TMP_FILES+=("$tmp_file")
@@ -185,7 +184,7 @@ if [[ ${#FAILED[@]} -gt 0 ]]; then
     echo "------------------------------------------------------------"
     for num in "${FAILED[@]}"; do
         echo ""
-        echo "  클러스터 : ${num}) ${CLUSTER_HOSTS[$((num-1))]}"
+        echo "  클러스터 : ${num}) ${CLUSTER_HOSTS[$num]}" # [변경] $((num-1)) → $num
         echo "  재시도   : $SCRIPT_NAME $INPUT_RETRY -c $num"
     done
     echo ""
