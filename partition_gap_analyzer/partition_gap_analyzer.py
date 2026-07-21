@@ -4,12 +4,21 @@
 메타스토어에 등록된 최소 파티션 날짜(min_partition_date)와
 HDFS 상에 실제 파일로 존재하는 최소 파티션 날짜(min_file_date)의 차이를 계산하여,
 메타스토어에 누락된 "고아 데이터"의 갭 일수와 디스크 용량을 출력한다.
+
+단일 테이블 진단:
+    python3 partition_gap_analyzer.py db.table_name
+
+여러 테이블 일괄 진단 (결과를 CSV로 저장):
+    python3 partition_gap_analyzer.py --list tables.txt --output result.csv
+    (tables.txt: 한 줄에 db.table 하나씩, '#'으로 시작하는 줄은 주석으로 무시)
 """
 
 import argparse
+import csv
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import List, Optional, Tuple
 
@@ -23,24 +32,32 @@ LDAP_PASSWORD = "your_ldap_password"
 SSL_CA_CERT = "/etc/ssl/certs/impala_ca.pem"
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Impala 파티션-HDFS 갭 분석")
-    parser.add_argument("table", help="분석 대상 테이블명 (db.table 형식)")
-    args = parser.parse_args()
-    table = args.table
+@dataclass
+class GapResult:
+    """갭이 존재하는 경우의 분석 결과."""
 
-    conn = connect(
-        host=IMPALA_HOST,
-        port=IMPALA_PORT,
-        auth_mechanism="LDAP",
-        user=LDAP_USER,
-        password=LDAP_PASSWORD,
-        use_ssl=True,
-        ca_cert=SSL_CA_CERT,
-    )
-    cursor = conn.cursor()
+    table: str
+    min_file_date: date
+    gap_end_date: date
+    gap_days: int
+    gap_gb: float
 
-    # 1. DESCRIBE FORMATTED로 LOCATION과 1단 파티션 컬럼명 추출 (하드코딩 금지, 자동 파싱)
+
+def format_gap_size(gap_gb: float) -> str:
+    """콘솔 출력용 갭 용량 포맷 (MB / GB / TB 중 최대 TB까지 자동 전환)."""
+    if gap_gb >= 1024:
+        return f"{gap_gb / 1024:.2f} TB"
+    if gap_gb < 1:
+        return f"{gap_gb * 1024:.2f} MB"
+    return f"{gap_gb:.2f} GB"
+
+
+def analyze_table(cursor, table: str) -> Optional[GapResult]:
+    """테이블 1개에 대해 파티션 갭을 분석. 갭이 없으면 None 반환."""
+    total_steps = 4
+
+    # 1단계: DESCRIBE FORMATTED로 LOCATION과 1단 파티션 컬럼명 추출 (하드코딩 금지, 자동 파싱)
+    print(f"  [1/{total_steps}] DESCRIBE FORMATTED 조회 중 (Location/파티션 컬럼 파싱)...")
     cursor.execute(f"DESCRIBE FORMATTED {table}")
     rows = cursor.fetchall()
 
@@ -69,7 +86,8 @@ def main() -> None:
     if partition_col is None:
         raise RuntimeError(f"'{table}' 테이블은 파티션이 없는 테이블입니다 (non-partitioned)")
 
-    # 2. SHOW PARTITIONS로 메타스토어 최소 파티션 날짜(min_partition_date) 조회
+    # 2단계: SHOW PARTITIONS로 메타스토어 최소 파티션 날짜(min_partition_date) 조회
+    print(f"  [2/{total_steps}] SHOW PARTITIONS 조회 중 (min_partition_date 계산)...")
     cursor.execute(f"SHOW PARTITIONS {table}")
     partition_rows = cursor.fetchall()
     partition_col_names = [d[0] for d in cursor.description]
@@ -89,18 +107,16 @@ def main() -> None:
         raise RuntimeError(f"'{table}' 테이블에 유효한 파티션이 없습니다")
 
     min_partition_date = min(partition_dates)
-    cursor.close()
-    conn.close()
 
-    # 3. HDFS 디렉토리 스캔 (단일 호출로 끝냄, 재조회 없음)
+    # 3단계: HDFS 디렉토리 스캔 (단일 호출로 끝냄, 재조회 없음)
+    print(f"  [3/{total_steps}] HDFS 디렉토리 스캔 중 (hdfs dfs -du -s)...")
     du_result = subprocess.run(
         ["hdfs", "dfs", "-du", "-s", f"{location}/*"],
         capture_output=True,
         text=True,
     )
     if du_result.returncode != 0:
-        print(f"HDFS 조회 실패: {du_result.stderr}", file=sys.stderr)
-        sys.exit(1)
+        raise RuntimeError(f"HDFS 조회 실패: {du_result.stderr}")
 
     file_entries: List[Tuple[int, date]] = []  # (bytes, date)
     for line in du_result.stdout.strip().splitlines():
@@ -110,7 +126,7 @@ def main() -> None:
         size_bytes_str, path = parts
         match = re.search(rf"{re.escape(partition_col)}=(\d{{4}}-\d{{2}}-\d{{2}})", path)
         if not match:
-            print(f"경고: 날짜 형식이 아닌 디렉토리 스킵 - {path}", file=sys.stderr)
+            print(f"    경고: 날짜 형식이 아닌 디렉토리 스킵 - {path}", file=sys.stderr)
             continue
         dir_date = datetime.strptime(match.group(1), "%Y-%m-%d").date()
         file_entries.append((int(size_bytes_str), dir_date))
@@ -120,27 +136,85 @@ def main() -> None:
 
     min_file_date = min(d for _, d in file_entries)
 
-    # 4. 갭 없음 판정
+    # 4단계: 갭 일수/용량 계산 (재조회 없이 메모리 상의 file_entries만 필터링)
+    print(f"  [4/{total_steps}] 갭 계산 중...")
     if min_file_date >= min_partition_date:
-        print(f"테이블명: {table}")
-        print("갭 없음 (min_file_date >= min_partition_date)")
-        return
+        return None
 
     gap_end_date = min_partition_date - timedelta(days=1)
     gap_days = (min_partition_date - min_file_date).days
-
-    # 5. 갭 용량 계산 (재조회 없이 메모리 상의 file_entries만 필터링)
     gap_bytes = sum(size for size, d in file_entries if min_file_date <= d <= gap_end_date)
     gap_gb = gap_bytes / (1024 ** 3)
-    if gap_gb < 1:
-        gap_size_str = f"{gap_bytes / (1024 ** 2):.2f} MB"
-    else:
-        gap_size_str = f"{gap_gb:.2f} GB"
 
-    # 6. 출력
+    return GapResult(table, min_file_date, gap_end_date, gap_days, gap_gb)
+
+
+def print_result(table: str, result: Optional[GapResult]) -> None:
+    """단일 테이블 분석 결과를 출력."""
     print(f"테이블명: {table}")
-    print(f"gap날짜 : {min_file_date} ~ {gap_end_date} ({gap_days}일)")
-    print(f"gap용량 : {gap_size_str}")
+    if result is None:
+        print("갭 없음 (min_file_date >= min_partition_date)")
+    else:
+        print(f"gap날짜 : {result.min_file_date} ~ {result.gap_end_date} ({result.gap_days}일)")
+        print(f"gap용량 : {format_gap_size(result.gap_gb)}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Impala 파티션-HDFS 갭 분석")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("table", nargs="?", default=None, help="분석 대상 테이블명 (db.table 형식)")
+    group.add_argument("--list", dest="table_list_file", help="테이블 목록 파일 (한 줄에 db.table 하나씩)")
+    parser.add_argument(
+        "--output", default="partition_gap_result.csv", help="--list 사용 시 CSV 결과 저장 경로"
+    )
+    args = parser.parse_args()
+
+    conn = connect(
+        host=IMPALA_HOST,
+        port=IMPALA_PORT,
+        auth_mechanism="LDAP",
+        user=LDAP_USER,
+        password=LDAP_PASSWORD,
+        use_ssl=True,
+        ca_cert=SSL_CA_CERT,
+    )
+    cursor = conn.cursor()
+
+    if args.table_list_file:
+        with open(args.table_list_file, encoding="utf-8") as f:
+            tables = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
+        if not tables:
+            raise RuntimeError(f"'{args.table_list_file}'에 유효한 테이블명이 없습니다")
+
+        total = len(tables)
+        results: List[GapResult] = []
+        for i, table in enumerate(tables, 1):
+            print(f"[{i}/{total}] {table} 분석 중...")
+            try:
+                result = analyze_table(cursor, table)
+            except Exception as e:
+                print(f"  실패: {e}", file=sys.stderr)
+                continue
+            if result is None:
+                print("  갭 없음")
+                continue
+            print(f"  gap날짜 : {result.min_file_date} ~ {result.gap_end_date} ({result.gap_days}일)")
+            print(f"  gap용량 : {format_gap_size(result.gap_gb)}")
+            results.append(result)
+
+        with open(args.output, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["table", "gap_day", "gap_size"])  # gap_size 단위는 GB로 통일
+            for r in results:
+                writer.writerow([r.table, r.gap_days, f"{r.gap_gb:.2f}"])
+
+        print(f"완료: 총 {total}개 테이블 중 {len(results)}개 갭 발견, CSV 저장 -> {args.output}")
+    else:
+        result = analyze_table(cursor, args.table)
+        print_result(args.table, result)
+
+    cursor.close()
+    conn.close()
 
 
 if __name__ == "__main__":
