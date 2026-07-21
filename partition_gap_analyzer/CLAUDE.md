@@ -90,8 +90,8 @@ python3 partition_gap_analyzer.py --list tables.txt --output result.csv
 - `tables.txt`: 한 줄에 `db.table` 하나씩, `#`으로 시작하는 줄은 주석으로 무시
 - 단일 Impala 커넥션을 재사용하여 테이블마다 순회하며 분석 (테이블마다 재연결하지 않음)
 - 각 테이블 처리 중 예외 발생 시 해당 테이블만 스킵하고 다음 테이블 계속 진행 (일괄 진단이 한 테이블 실패로 전체 중단되지 않도록)
-- 결과를 CSV로 저장: 컬럼 `table,gap_day,gap_size,status,error`
-  - `gap_size`는 GB 단위 숫자로 통일 (스프레드시트에서 정렬/합산 가능하도록 MB/TB 전환 없이 고정)
+- 결과를 CSV로 저장: 컬럼 `table,gap_day,gap_size_bytes,status,error`
+  - `gap_size_bytes`는 단위 변환 없는 raw bytes 정수값 (정확한 값 보존, 필요 시 사용자가 직접 단위 변환)
   - `status`: `OK`(갭 발견) / `NO_GAP`(갭 없음) / `FAIL`(조회 중 예외 발생) — 모든 테이블이 CSV에 기록되며, 실패한 테이블도 누락 없이 `error` 컬럼에 예외 메시지와 함께 남음
 - 단일 테이블 모드와 배치 모드는 `table`(위치 인자) / `--list`(파일 경로) 중 하나만 지정하는 상호 배타적 옵션으로 구분
 

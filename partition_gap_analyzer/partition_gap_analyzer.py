@@ -40,11 +40,12 @@ class GapResult:
     min_file_date: date
     gap_end_date: date
     gap_days: int
-    gap_gb: float
+    gap_bytes: int
 
 
-def format_gap_size(gap_gb: float) -> str:
+def format_gap_size(gap_bytes: int) -> str:
     """콘솔 출력용 갭 용량 포맷 (MB / GB / TB 중 최대 TB까지 자동 전환)."""
+    gap_gb = gap_bytes / (1024 ** 3)
     if gap_gb >= 1024:
         return f"{gap_gb / 1024:.2f} TB"
     if gap_gb < 1:
@@ -144,9 +145,8 @@ def analyze_table(cursor, table: str) -> Optional[GapResult]:
     gap_end_date = min_partition_date - timedelta(days=1)
     gap_days = (min_partition_date - min_file_date).days
     gap_bytes = sum(size for size, d in file_entries if min_file_date <= d <= gap_end_date)
-    gap_gb = gap_bytes / (1024 ** 3)
 
-    return GapResult(table, min_file_date, gap_end_date, gap_days, gap_gb)
+    return GapResult(table, min_file_date, gap_end_date, gap_days, gap_bytes)
 
 
 def print_result(table: str, result: Optional[GapResult]) -> None:
@@ -156,7 +156,7 @@ def print_result(table: str, result: Optional[GapResult]) -> None:
         print("갭 없음 (min_file_date >= min_partition_date)")
     else:
         print(f"gap날짜 : {result.min_file_date} ~ {result.gap_end_date} ({result.gap_days}일)")
-        print(f"gap용량 : {format_gap_size(result.gap_gb)}")
+        print(f"gap용량 : {format_gap_size(result.gap_bytes)}")
 
 
 def main() -> None:
@@ -204,14 +204,14 @@ def main() -> None:
                 no_gap_count += 1
                 continue
             print(f"  gap날짜 : {result.min_file_date} ~ {result.gap_end_date} ({result.gap_days}일)")
-            print(f"  gap용량 : {format_gap_size(result.gap_gb)}")
-            csv_rows.append([table, result.gap_days, f"{result.gap_gb:.2f}", "OK", ""])
+            print(f"  gap용량 : {format_gap_size(result.gap_bytes)}")
+            csv_rows.append([table, result.gap_days, result.gap_bytes, "OK", ""])
             ok_count += 1
 
         with open(args.output, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            # gap_size 단위는 GB로 통일, status: OK(갭 발견) / NO_GAP / FAIL
-            writer.writerow(["table", "gap_day", "gap_size", "status", "error"])
+            # gap_size는 raw bytes로 저장 (단위 변환 없이 정확한 값 보존), status: OK(갭 발견) / NO_GAP / FAIL
+            writer.writerow(["table", "gap_day", "gap_size_bytes", "status", "error"])
             writer.writerows(csv_rows)
 
         print(
