@@ -49,18 +49,20 @@ def main() -> None:
     in_partition_section = False
     for row in rows:
         col_name = (row[0] or "").strip()
+        # Location:은 "# Detailed Table Information" 섹션에 있어
+        # "# Partition Information"보다 뒤에 나오므로, 파티션 컬럼을 찾은 뒤에도
+        # 루프를 끝까지 돌며 계속 확인해야 한다 (break 금지)
         if col_name.startswith("Location:"):
             location = (row[1] or "").strip()
+            continue
         if col_name == "# Partition Information":
             in_partition_section = True
             continue
-        if in_partition_section:
+        if in_partition_section and partition_col is None:
             if col_name == "" or col_name.startswith("#"):
-                if partition_col is not None:
-                    break
                 continue
             partition_col = col_name
-            break
+            in_partition_section = False  # 1단 파티션 컬럼만 필요하므로 섹션 종료
 
     if location is None:
         raise RuntimeError(f"'{table}' 테이블의 LOCATION 파싱 실패")
