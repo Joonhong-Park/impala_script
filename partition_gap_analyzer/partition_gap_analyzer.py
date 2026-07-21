@@ -187,28 +187,37 @@ def main() -> None:
             raise RuntimeError(f"'{args.table_list_file}'에 유효한 테이블명이 없습니다")
 
         total = len(tables)
-        results: List[GapResult] = []
+        csv_rows: List[List[str]] = []
+        ok_count = fail_count = no_gap_count = 0
         for i, table in enumerate(tables, 1):
             print(f"[{i}/{total}] {table} 분석 중...")
             try:
                 result = analyze_table(cursor, table)
             except Exception as e:
                 print(f"  실패: {e}", file=sys.stderr)
+                csv_rows.append([table, "", "", "FAIL", str(e)])
+                fail_count += 1
                 continue
             if result is None:
                 print("  갭 없음")
+                csv_rows.append([table, "", "", "NO_GAP", ""])
+                no_gap_count += 1
                 continue
             print(f"  gap날짜 : {result.min_file_date} ~ {result.gap_end_date} ({result.gap_days}일)")
             print(f"  gap용량 : {format_gap_size(result.gap_gb)}")
-            results.append(result)
+            csv_rows.append([table, result.gap_days, f"{result.gap_gb:.2f}", "OK", ""])
+            ok_count += 1
 
         with open(args.output, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(["table", "gap_day", "gap_size"])  # gap_size 단위는 GB로 통일
-            for r in results:
-                writer.writerow([r.table, r.gap_days, f"{r.gap_gb:.2f}"])
+            # gap_size 단위는 GB로 통일, status: OK(갭 발견) / NO_GAP / FAIL
+            writer.writerow(["table", "gap_day", "gap_size", "status", "error"])
+            writer.writerows(csv_rows)
 
-        print(f"완료: 총 {total}개 테이블 중 {len(results)}개 갭 발견, CSV 저장 -> {args.output}")
+        print(
+            f"완료: 총 {total}개 테이블 중 갭 발견 {ok_count}개, 갭 없음 {no_gap_count}개, "
+            f"실패 {fail_count}개, CSV 저장 -> {args.output}"
+        )
     else:
         result = analyze_table(cursor, args.table)
         print_result(args.table, result)
